@@ -24,4 +24,5 @@ audio:
 pipeline:
   max_queue_size: 5
   show_preview: true
+  debug_mode: true
   output_stream_url: "ws://localhost:8000/stream"

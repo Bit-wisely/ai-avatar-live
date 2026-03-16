@@ -49,8 +49,15 @@ class RealTimePipeline:
             if not self.frame_queue.empty():
                 frame = self.frame_queue.get()
                 landmarks = self.tracker.process(frame)
-                if not self.landmark_queue.full():
-                    self.landmark_queue.put(landmarks)
+                
+                if self.config['pipeline'].get('debug_mode', False):
+                    # In debug mode, we draw on the webcam frame and send that to render queue
+                    debug_frame = self.tracker.draw_landmarks(frame, landmarks)
+                    if not self.render_queue.full():
+                        self.render_queue.put(debug_frame)
+                else:
+                    if not self.landmark_queue.full():
+                        self.landmark_queue.put(landmarks)
 
     def _rendering_thread(self):
         while self.running:
@@ -80,7 +87,10 @@ class RealTimePipeline:
         for t in threads:
             t.start()
             
-        self.mic.start_stream(self._audio_callback)
+        try:
+            self.mic.start_stream(self._audio_callback)
+        except Exception as e:
+            print(f"Warning: Could not start audio stream: {e}")
 
         print("Pipeline running. Press 'q' to quit.")
         
