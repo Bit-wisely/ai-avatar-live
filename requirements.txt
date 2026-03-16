@@ -1,0 +1,19 @@
+opencv-python
+mediapipe
+torch
+torchvision
+torchaudio
+numpy
+pyyaml
+pyaudio
+sounddevice
+librosa
+fastapi
+uvicorn
+websockets
+ffmpeg-python
+requests
+tqdm
+fairseq
+pyworld
+# RVC dependencies often include specific versions of fairseq and others
