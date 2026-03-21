@@ -1,30 +1,19 @@
-import torch
-import numpy as np
+"""
+Legacy AvatarRenderer stub – kept for backwards compatibility.
+The active renderer is now Portrait3DRenderer in portrait_3d_renderer.py
+"""
 import cv2
+import numpy as np
 
 class AvatarRenderer:
-    def __init__(self, avatar_path, model_path, use_gpu=True):
-        self.device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
-        self.avatar_image = cv2.imread(avatar_path)
-        if self.avatar_image is None:
-            raise Exception(f"Avatar image not found at {avatar_path}")
-            
-        # Placeholder for LivePortrait model loading
-        # In a real implementation, you'd import the LivePortrait inference modules here
-        # from liveportrait import LivePortraitInference
-        # self.model = LivePortraitInference(model_path, device=self.device)
-        print(f"AvatarRenderer initialized on {self.device}")
+    """Thin wrapper retained for config compatibility."""
+    def __init__(self, avatar_path="", model_path="", use_gpu=True):
+        self.avatar_image = None
+        if avatar_path:
+            img = cv2.imread(avatar_path)
+            if img is not None:
+                self.avatar_image = img
+        print("[AvatarRenderer] Legacy stub loaded (use Portrait3DRenderer for 3D output)")
 
-    def render(self, landmarks):
-        """
-        Animate the avatar using detected landmarks.
-        """
-        if landmarks is None:
-            return self.avatar_image
-
-        # This would call the LivePortrait inference engine
-        # result = self.model.animate(self.avatar_image, landmarks)
-        # For now, we return the avatar image as a placeholder
-        # In a real scenario, this involves warping based on landmark deltas
-        
-        return self.avatar_image
+    def render(self, landmarks=None):
+        return self.avatar_image if self.avatar_image is not None else np.zeros((512, 512, 3), dtype=np.uint8)

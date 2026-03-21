@@ -1,115 +1,142 @@
+"""
+RealTimePipeline – revised
+==========================
+* Accepts dynamically-supplied portrait (from HTTP upload)
+* Sends both the LIVE webcam frame AND the animated 3-D portrait frame
+  to WebSocket clients as a single JSON message
+* Supports start / stop driven by the simulation_active flag in AppState
+"""
+
 import threading
-import queue
 import time
 import cv2
+import base64
+import asyncio
+import numpy as np
+
 from src.camera.webcam_capture import WebcamCapture
 from src.tracking.face_landmarks import FaceTracker
-from src.animation.avatar_renderer import AvatarRenderer
-from src.audio.mic_input import MicInput
-from src.audio.voice_conversion import VoiceConverter
+from src.animation.portrait_3d_renderer import Portrait3DRenderer
+from src.streaming.video_stream import streamer, state
+
+
+def _encode_frame(frame: np.ndarray, quality: int = 82) -> str:
+    """BGR numpy → base64 JPEG string."""
+    _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return base64.b64encode(buf).decode('utf-8')
+
 
 class RealTimePipeline:
-    def __init__(self, config):
+    """
+    Captures webcam, tracks face, warps portrait, and streams both feeds.
+    """
+
+    def __init__(self, config: dict):
         self.config = config
         self.running = False
-        
-        # Queues for inter-thread communication
-        self.frame_queue = queue.Queue(maxsize=config['pipeline']['max_queue_size'])
-        self.landmark_queue = queue.Queue(maxsize=config['pipeline']['max_queue_size'])
-        self.audio_queue = queue.Queue(maxsize=10)
-        self.render_queue = queue.Queue(maxsize=config['pipeline']['max_queue_size'])
 
-        # Initialize modules
+        cam_cfg = config['camera']
         self.camera = WebcamCapture(
-            config['camera']['device_id'],
-            config['camera']['width'],
-            config['camera']['height']
+            cam_cfg['device_id'],
+            cam_cfg['width'],
+            cam_cfg['height'],
         )
         self.tracker = FaceTracker()
-        self.renderer = AvatarRenderer(
-            config['animation']['avatar_path'],
-            config['animation']['model_path']
-        )
-        self.mic = MicInput(config['audio']['sample_rate'], config['audio']['chunk_size'])
-        self.converter = VoiceConverter(
-            config['audio']['rvc_model'],
-            config['audio']['index_path']
-        )
 
-    def _capture_thread(self):
-        while self.running:
-            frame = self.camera.get_frame()
-            if frame is not None:
-                if not self.frame_queue.full():
-                    self.frame_queue.put(frame)
-            time.sleep(1/self.config['camera']['fps'])
+        # Portrait renderer – created lazily when a portrait is loaded
+        self._renderer: Portrait3DRenderer | None = None
+        self._renderer_lock = threading.Lock()
 
-    def _tracking_thread(self):
-        while self.running:
-            if not self.frame_queue.empty():
-                frame = self.frame_queue.get()
-                landmarks = self.tracker.process(frame)
-                
-                if self.config['pipeline'].get('debug_mode', False):
-                    # In debug mode, we draw on the webcam frame and send that to render queue
-                    debug_frame = self.tracker.draw_landmarks(frame, landmarks)
-                    if not self.render_queue.full():
-                        self.render_queue.put(debug_frame)
-                else:
-                    if not self.landmark_queue.full():
-                        self.landmark_queue.put(landmarks)
+        # Background watcher thread checks for new portraits
+        self._portrait_hash: int = 0
 
-    def _rendering_thread(self):
-        while self.running:
-            if not self.landmark_queue.empty():
-                landmarks = self.landmark_queue.get()
-                rendered_frame = self.renderer.render(landmarks)
-                if not self.render_queue.full():
-                    self.render_queue.put(rendered_frame)
-
-    def _audio_callback(self, indata, frames, time, status):
-        if status:
-            print(status)
-        converted_audio = self.converter.convert(indata.copy())
-        # In a real app, this would be piped to a virtual audio cable or speaker
-        self.audio_queue.put(converted_audio)
+    # ── Public API ─────────────────────────────────────────────────────────────
 
     def run(self):
+        """Main blocking loop – call from a dedicated thread."""
         self.running = True
-        
-        # Start processing threads
-        threads = [
-            threading.Thread(target=self._capture_thread, daemon=True),
-            threading.Thread(target=self._tracking_thread, daemon=True),
-            threading.Thread(target=self._rendering_thread, daemon=True)
-        ]
-        
-        for t in threads:
-            t.start()
-            
-        try:
-            self.mic.start_stream(self._audio_callback)
-        except Exception as e:
-            print(f"Warning: Could not start audio stream: {e}")
+        fps_target = self.config['camera'].get('fps', 30)
+        frame_time = 1.0 / fps_target
 
-        print("Pipeline running. Press 'q' to quit.")
-        
-        try:
-            while self.running:
-                if not self.render_queue.empty():
-                    frame = self.render_queue.get()
-                    cv2.imshow("AI Avatar Live", frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-                else:
-                    time.sleep(0.01)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            self.stop()
+        print("[Pipeline] Starting capture loop …")
+
+        while self.running:
+            t0 = time.perf_counter()
+
+            # 1. Check if a new portrait has been uploaded
+            self._refresh_renderer()
+
+            # 2. Grab live frame
+            live_frame = self.camera.get_frame()
+            if live_frame is None:
+                time.sleep(0.05)
+                continue
+
+            # 3. Only run the expensive render if simulation is active
+            if state.simulation_active and self._renderer is not None:
+                portrait_out = self._renderer.render(live_frame)
+            elif self._renderer is not None:
+                # Show static portrait when paused
+                portrait_out = self._renderer.portrait.copy()
+            else:
+                # No portrait yet – show placeholder
+                portrait_out = self._make_placeholder(live_frame.shape)
+
+            # 4. Resize live frame to match portrait size for side-by-side display
+            ph, pw = portrait_out.shape[:2]
+            live_resized = cv2.resize(live_frame, (pw, ph))
+
+            # 5. Broadcast both frames as a single JSON message
+            payload = {
+                "live": _encode_frame(live_resized),
+                "portrait": _encode_frame(portrait_out),
+                "simulation_active": state.simulation_active,
+            }
+
+            if state.loop:
+                import json
+                asyncio.run_coroutine_threadsafe(
+                    streamer.broadcast_json(payload),
+                    state.loop
+                )
+
+            # 6. Rate limit
+            elapsed = time.perf_counter() - t0
+            sleep = frame_time - elapsed
+            if sleep > 0:
+                time.sleep(sleep)
+
+        print("[Pipeline] Capture loop stopped.")
 
     def stop(self):
         self.running = False
         self.camera.release()
-        self.mic.stop_stream()
-        cv2.destroyAllWindows()
+
+    # ── Helpers ────────────────────────────────────────────────────────────────
+
+    def _refresh_renderer(self):
+        """Re-create renderer if the shared portrait has changed."""
+        portrait = state.portrait_image
+        if portrait is None:
+            return
+        h = id(portrait)
+        if h != self._portrait_hash:
+            self._portrait_hash = h
+            new_renderer = Portrait3DRenderer(portrait)
+            with self._renderer_lock:
+                self._renderer = new_renderer
+            print("[Pipeline] Renderer refreshed with new portrait.")
+
+    @staticmethod
+    def _make_placeholder(live_shape: tuple) -> np.ndarray:
+        h, w = live_shape[:2]
+        canvas = np.zeros((h, w, 3), dtype=np.uint8)
+        canvas[:] = (18, 18, 25)   # dark background
+        text = "Upload a portrait"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.7 if w > 400 else 0.5
+        thickness = 1
+        (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
+        tx, ty = (w - tw) // 2, (h + th) // 2
+        cv2.putText(canvas, text, (tx, ty), font, scale, (120, 120, 160), thickness, cv2.LINE_AA)
+        return canvas

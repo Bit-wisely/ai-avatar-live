@@ -14,15 +14,7 @@ animation:
   avatar_path: "assets/avatar_image.png"
   use_gpu: true
 
-audio:
-  sample_rate: 44100
-  chunk_size: 1024
-  rvc_model: "models/rvc_voice/voice.pth"
-  index_path: "models/rvc_voice/voice.index"
-  pitch_shift: 0
-
 pipeline:
   max_queue_size: 5
-  show_preview: true
-  debug_mode: true
-  output_stream_url: "ws://localhost:8000/stream"
+  show_preview: false
+  debug_mode: false
