@@ -212,9 +212,9 @@ class Portrait3DRenderer:
         if self.src_pts is not None:
             self.src_tri_idx = _build_triangulation(self.src_pts)
             self.face_mask = _face_oval_mask(portrait_bgr.shape, self.src_pts)
-            print(f"[Portrait3DRenderer] ✓ {len(self.src_pts)} landmarks, {len(self.src_tri_idx)} triangles")
+            print(f"[Portrait3DRenderer] [OK] {len(self.src_pts)} landmarks, {len(self.src_tri_idx)} triangles")
         else:
-            print("[Portrait3DRenderer] ⚠ No face detected in portrait – will display static image")
+            print("[Portrait3DRenderer] [WARN] No face detected in portrait - will display static image")
 
         # Temporal smoothing
         self._smoothed: np.ndarray | None = None
